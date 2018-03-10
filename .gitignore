@@ -76,6 +76,8 @@ distribute/*
 cmake_build
 .cmake_build
 gen
+.setuptools-cmake-build
+.pytest_cache
 
 # Bram
 plsdontbreak
@@ -94,3 +96,13 @@ LOCK
 LOG*
 CURRENT
 MANIFEST-*
+
+# generated version file
+caffe2/version.py
+
+# setup.py intermediates
+.eggs
+caffe2.egg-info
+
+# Atom/Watchman required file
+.watchmanconfig

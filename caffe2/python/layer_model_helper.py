@@ -27,6 +27,8 @@ from caffe2.python.modeling.parameter_info import (
 from caffe2.python.modeling.parameter_sharing import (
     parameter_sharing_context,
 )
+from caffe2.python.modeling.net_modifier import NetModifier
+
 from caffe2.python.optimizer import get_param_device
 from caffe2.python.regularizer import Regularizer
 from caffe2.python.layers import layers
@@ -73,6 +75,13 @@ class LayerModelHelper(model_helper.ModelHelper):
         self._default_optimizer = None
         self._loss = None
         self._output_schema = None
+
+        self._post_grad_net_modifiers = []
+        self._final_net_modifiers = []
+
+        # breakdown map; breakdown features are categorical (like dense) but not
+        # necessarily used to represent data for training
+        self._breakdown_map = None
 
         # Connect Schema to self.net. That particular instance of schmea will be
         # use for generation of the Layers accross the network and would be used
@@ -146,6 +155,8 @@ class LayerModelHelper(model_helper.ModelHelper):
     def add_global_constant(
         self, name, array=None, dtype=None, initializer=None
     ):
+        assert isinstance(name, six.string_types), (
+            'name should be a string as we are using it as map key')
         # This is global namescope for constants. They will be created in all
         # init_nets and there should be very few of them.
         assert name not in self.global_constants, \
@@ -165,6 +176,18 @@ class LayerModelHelper(model_helper.ModelHelper):
         # To ad hoc add new global constants without duplication
         # if the name was already registered in global_constants, it will not be
         # added even if the intended value is different from its original value
+
+        def op_equal(operator1, operator2):
+            o1 = copy.deepcopy(operator1)
+            o2 = copy.deepcopy(operator2)
+            # debug_info is supposed to be different, and we don't need to
+            # compare debug_info
+            if hasattr(o1, 'debug_info'):
+                o1.debug_info = ''
+            if hasattr(o2, 'debug_info'):
+                o2.debug_info = ''
+            return o1 == o2
+
         if name in self.global_constants:
             blob_name = self.global_constants[name]
             initializer_op = \
@@ -173,8 +196,8 @@ class LayerModelHelper(model_helper.ModelHelper):
                 )
             # check if the original initializer is the same as the one intended
             # now
-            assert initializer_op == \
-                self.global_constant_initializers[blob_name], \
+            assert op_equal(initializer_op,
+                            self.global_constant_initializers[blob_name]), \
                 "conflict initializers for global constant %s, " \
                 "previous %s, now %s" % (
                     blob_name, str(initializer_op),
@@ -207,8 +230,9 @@ class LayerModelHelper(model_helper.ModelHelper):
         if shape != ref_shape:
             raise ValueError(
                 "Got inconsistent shapes between shared parameters "
-                "when trying to map a blob in scope {0} to {1}.".format(
-                    scope.CurrentNameScope(), param_name)
+                "when trying to map a blob in scope {0} to {1}. ref_shape : "
+                " {2}, shape : {3}".format(
+                    scope.CurrentNameScope(), param_name, ref_shape, shape)
             )
 
     def create_param(self, param_name, shape, initializer, optimizer=None,
@@ -307,6 +331,20 @@ class LayerModelHelper(model_helper.ModelHelper):
 
         return param_blobs
 
+    def add_post_grad_net_modifiers(self, modifier):
+        assert modifier not in self._post_grad_net_modifiers,\
+            "{0} is already in {1}".format(modifier, self._post_grad_net_modifiers)
+        assert isinstance(modifier, NetModifier),\
+            "{} has to be a NetModifier instance".format(modifier)
+        self._post_grad_net_modifiers.append(modifier)
+
+    def add_final_net_modifiers(self, modifier):
+        assert modifier not in self._final_net_modifiers,\
+            "{0} is already in {1}".format(modifier, self._final_net_modifiers)
+        assert isinstance(modifier, NetModifier),\
+            "{} has to be a NetModifier instance".format(modifier)
+        self._final_net_modifiers.append(modifier)
+
     @property
     def seed(self):
         return self._seed
@@ -368,6 +406,9 @@ class LayerModelHelper(model_helper.ModelHelper):
         assert self._loss is None
         self._loss = loss
 
+    def has_loss(self):
+        return self._loss is not None
+
     def add_loss(self, loss, name='unnamed'):
         assert loss is not None, "Added loss should not be None"
         assert isinstance(loss, schema.Scalar) or isinstance(
@@ -384,6 +425,10 @@ class LayerModelHelper(model_helper.ModelHelper):
                 index += 1
             loss_struct = schema.Struct((prefix, loss))
             self._loss = self._loss + loss_struct
+
+    def add_trainer_extra_schema(self, trainer_extra_schema):
+        trainer_extra_record = schema.NewRecord(self.net, trainer_extra_schema)
+        self._trainer_extra_schema += trainer_extra_record
 
     def __getattr__(self, layer):
         if layer.startswith('__'):
@@ -462,6 +507,28 @@ class LayerModelHelper(model_helper.ModelHelper):
             regularizer(
                 train_net, train_init_net, param, grad_map.get(str(param)))
 
+    def apply_post_grad_net_modifiers(
+        self,
+        trainer_net,
+        trainer_init_net,
+        grad_map,
+        blob_to_device=None,
+    ):
+        for modifier in self._post_grad_net_modifiers:
+            modifier(trainer_net, trainer_init_net, grad_map,
+                     blob_to_device=blob_to_device)
+
+    def apply_final_net_modifiers(
+        self,
+        trainer_net,
+        trainer_init_net,
+        grad_map,
+        blob_to_device=None,
+    ):
+        for modifier in self._final_net_modifiers:
+            modifier(trainer_net, trainer_init_net, grad_map,
+                     blob_to_device=blob_to_device)
+
     def apply_optimizers(
         self,
         train_net,
@@ -493,3 +560,16 @@ class LayerModelHelper(model_helper.ModelHelper):
     # An optimizer which allows us to do NO optimization
     def NoOptim(self, *args, **kwargs):
         pass
+
+    @property
+    def breakdown_map(self):
+        return self._breakdown_map
+
+    @breakdown_map.setter
+    def breakdown_map(self, breakdown_map):
+        # TODO(xlwang): provide more rich feature information in breakdown_map;
+        # and change the assertion accordingly
+        assert isinstance(breakdown_map, dict)
+        assert all(isinstance(k, six.string_types) for k in breakdown_map)
+        assert sorted(list(breakdown_map.values())) == range(len(breakdown_map))
+        self._breakdown_map = breakdown_map

@@ -21,6 +21,7 @@ from __future__ import unicode_literals
 import hypothesis.strategies as st
 import numpy as np
 import numpy.testing as npt
+import unittest
 from hypothesis import given
 
 import caffe2.python.hypothesis_test_util as hu
@@ -45,6 +46,9 @@ from caffe2.python.layers.layers import (
     is_request_only_scalar,
     get_key,
 )
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 class TestLayers(LayersTestCase):
@@ -212,6 +216,53 @@ class TestLayers(LayersTestCase):
         predict_net = self.get_predict_net()
         self.assertNetContainOps(predict_net, [sparse_lookup_op_spec])
 
+    @given(
+        use_hashing=st.booleans(),
+        modulo=st.integers(min_value=100, max_value=200),
+    )
+    def testSparseFeatureHashIdList(self, use_hashing, modulo):
+        record = schema.NewRecord(
+            self.model.net,
+            schema.List(schema.Scalar(
+                np.int64,
+                metadata=schema.Metadata(categorical_limit=60000)
+            ))
+        )
+        output_schema = self.model.SparseFeatureHash(
+            record,
+            modulo=modulo,
+            use_hashing=use_hashing)
+
+        self.model.output_schema = output_schema
+
+        self.assertEqual(len(self.model.layers), 1)
+        self.assertEqual(output_schema._items.metadata.categorical_limit,
+                modulo)
+        train_init_net, train_net = self.get_training_nets()
+
+    @given(
+        use_hashing=st.booleans(),
+        modulo=st.integers(min_value=100, max_value=200),
+    )
+    def testSparseFeatureHashIdScoreList(self, use_hashing, modulo):
+        record = schema.NewRecord(self.model.net,
+                schema.Map(schema.Scalar(np.int64,
+                    metadata=schema.Metadata(
+                        categorical_limit=60000)),
+                    np.float32))
+
+        output_schema = self.model.SparseFeatureHash(
+            record,
+            modulo=modulo,
+            use_hashing=use_hashing)
+
+        self.model.output_schema = output_schema
+
+        self.assertEqual(len(self.model.layers), 1)
+        self.assertEqual(output_schema._items.keys.metadata.categorical_limit,
+                modulo)
+        train_init_net, train_net = self.get_training_nets()
+
     def testSparseLookupIncorrectPositionWeightedOnIdList(self):
         '''
         Currently the implementation of SparseLookup assumed input is id_score_list
@@ -328,6 +379,137 @@ class TestLayers(LayersTestCase):
 
         predict_net = self.get_predict_net()
         self.assertNetContainOps(predict_net, [sparse_lookup_op_spec])
+
+    def testPairwiseDotProductWithAllEmbeddings(self):
+        embedding_dim = 64
+        N = 5
+        record = schema.NewRecord(self.model.net, schema.Struct(
+            ('all_embeddings', schema.Scalar(
+                ((np.float32, (N, embedding_dim)))
+            )),
+        ))
+        current = self.model.PairwiseDotProduct(
+            record, N * N)
+
+        self.assertEqual(
+            schema.Scalar((np.float32, (N * N, ))),
+            current
+        )
+
+        train_init_net, train_net = self.get_training_nets()
+        self.assertNetContainOps(train_init_net, [])
+        self.assertNetContainOps(train_net, [
+            OpSpec("BatchMatMul", None, None),
+            OpSpec("Flatten", None, None),
+        ])
+
+    def testPairwiseDotProductWithXandYEmbeddings(self):
+        embedding_dim = 64
+        record = schema.NewRecord(self.model.net, schema.Struct(
+            ('x_embeddings', schema.Scalar(
+                ((np.float32, (5, embedding_dim)))
+            )),
+            ('y_embeddings', schema.Scalar(
+                ((np.float32, (6, embedding_dim)))
+            )),
+        ))
+        current = self.model.PairwiseDotProduct(
+            record, 5 * 6)
+
+        self.assertEqual(
+            schema.Scalar((np.float32, (5 * 6, ))),
+            current
+        )
+
+        train_init_net, train_net = self.get_training_nets()
+        self.assertNetContainOps(train_init_net, [])
+        self.assertNetContainOps(train_net, [
+            OpSpec("BatchMatMul", None, None),
+            OpSpec("Flatten", None, None),
+        ])
+
+    def testPairwiseDotProductWithXandYEmbeddingsAndGather(self):
+        embedding_dim = 64
+
+        output_idx = [1, 3, 5]
+        output_idx_blob = self.model.add_global_constant(
+            str(self.model.net.NextScopedBlob('pairwise_dot_product_gather')),
+            output_idx,
+            dtype=np.int32,
+        )
+        indices_to_gather = schema.Scalar(
+            (np.int32, len(output_idx)),
+            output_idx_blob,
+        )
+
+        record = schema.NewRecord(self.model.net, schema.Struct(
+            ('x_embeddings', schema.Scalar(
+                ((np.float32, (5, embedding_dim)))
+            )),
+            ('y_embeddings', schema.Scalar(
+                ((np.float32, (6, embedding_dim)))
+            )),
+            ('indices_to_gather', indices_to_gather),
+        ))
+        current = self.model.PairwiseDotProduct(
+            record, len(output_idx))
+
+        # This assert is not necessary,
+        # output size is passed into PairwiseDotProduct
+        self.assertEqual(
+            schema.Scalar((np.float32, (len(output_idx), ))),
+            current
+        )
+
+        train_init_net, train_net = self.get_training_nets()
+        self.assertNetContainOps(train_init_net, [])
+        self.assertNetContainOps(train_net, [
+            OpSpec("BatchMatMul", None, None),
+            OpSpec("Flatten", None, None),
+            OpSpec("BatchGather", None, None),
+        ])
+
+    def testPairwiseDotProductIncorrectInput(self):
+        embedding_dim = 64
+        record = schema.NewRecord(self.model.net, schema.Struct(
+            ('x_embeddings', schema.Scalar(
+                ((np.float32, (5, embedding_dim)))
+            )),
+        ))
+        with self.assertRaises(AssertionError):
+            self.model.PairwiseDotProduct(
+                record, 25)
+
+        record = schema.NewRecord(self.model.net, schema.Struct(
+            ('all_embeddings', schema.List(np.float32))
+        ))
+        with self.assertRaises(AssertionError):
+            self.model.PairwiseDotProduct(
+                record, 25)
+
+    def testConcat(self):
+        embedding_dim = 64
+        input_record = self.new_record(schema.Struct(
+            ('input1', schema.Scalar((np.float32, (embedding_dim, )))),
+            ('input2', schema.Scalar((np.float32, (embedding_dim, )))),
+            ('input3', schema.Scalar((np.float32, (embedding_dim, )))),
+        ))
+
+        output = self.model.Concat(input_record)
+        self.assertEqual(
+            schema.Scalar((np.float32, ((len(input_record.fields) * embedding_dim, )))),
+            output
+        )
+
+        # Note that in Concat layer we assume first dimension is batch.
+        # so input is B * embedding_dim
+        # add_axis=1 make it B * 1 * embedding_dim
+        # concat on axis=1 make it B * N * embedding_dim
+        output = self.model.Concat(input_record, axis=1, add_axis=1)
+        self.assertEqual(
+            schema.Scalar((np.float32, ((len(input_record.fields), embedding_dim)))),
+            output
+        )
 
     def testSamplingTrain(self):
         output_dims = 1000
@@ -870,6 +1052,18 @@ class TestLayers(LayersTestCase):
             self.model.input_feature_schema.float_features()
         assert len(ops[0].output) == 1
         assert ops[0].output[0] in ops[1].input
+
+    @unittest.skipIf(not workspace.has_gpu_support, "No gpu support.")
+    def testHalfToFloatTypeInference(self):
+        input = self.new_record(schema.Scalar((np.float32, (32,))))
+
+        output = self.model.FloatToHalf(input, 1)
+        assert output.field_type().base == np.float16
+        assert output.field_type().shape == (32, )
+
+        output = self.model.HalfToFloat(output, 1)
+        assert output.field_type().base == np.float32
+        assert output.field_type().shape == (32, )
 
     def testFunctionalLayerHelperAutoInferenceScalar(self):
         loss = self.model.AveragedLoss(self.model.input_feature_schema, 1)

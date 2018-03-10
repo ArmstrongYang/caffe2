@@ -38,7 +38,7 @@ import operator
 
 
 def get_sparse_lookup_predictor_version(version):
-    assert version in {'fp32', 'fp16', 'uint8rowwise'},\
+    assert version in {'fp32', 'fp16', 'uint8rowwise', 'fused_uint8rowwise'},\
         "Unexpected version of sparse_lookup layer {0}".format(version)
     return version
 
@@ -63,7 +63,7 @@ class SparseLookup(ModelLayer):
 
     def __init__(self, model, input_record, inner_shape, reducer,
                  weight_init=None, weight_optim=None,
-                 name='sparse_lookup', **kwargs):
+                 name='sparse_lookup', regularizer=None, **kwargs):
 
         super(SparseLookup, self).__init__(model, name, input_record, **kwargs)
 
@@ -111,7 +111,9 @@ class SparseLookup(ModelLayer):
             optimizer=weight_optim,
             ps_param=LayerPsParam(
                 sparse_key=sparse_key,
-                average_length=avg_length))
+                average_length=avg_length),
+            regularizer=regularizer
+        )
 
         self.scale_bias_init = ('ConstantFill', {'value': 0.0})
 
@@ -119,7 +121,8 @@ class SparseLookup(ModelLayer):
             param_name='scale_bias',
             shape=[],
             initializer=self.scale_bias_init,
-            optimizer=model.NoOptim)
+            optimizer=model.NoOptim,
+        )
 
         self.output_schema = schema.Scalar(
             (np.float32, inner_shape),
@@ -132,15 +135,26 @@ class SparseLookup(ModelLayer):
     def get_fp16_compatible_parameters(self):
         return [self.w]
 
-    def get_8bits_compatible_parameters(self):
-        RowwiseQuantized8BitsWeight =\
-            collections.namedtuple(
-                'RowwiseQuantized8BitsWeight',
-                ['w', 'scale_bias'], verbose=True)
+    def support_8bit(self):
+        # Rowwise quantization makes sense only if shape it's 2D matrix with
+        # second dimension >= 8
+        if len(self.shape) != 2 or self.shape[1] < 8:
+            return False
+        return True
 
-        weight = RowwiseQuantized8BitsWeight(
-            self.w, self.scale_bias)
-        return [weight]
+    def get_8bits_compatible_parameters(self, fused=True):
+        if not self.support_8bit():
+            return []
+        if fused:
+            RowwiseQuantized8BitsWeight = collections.namedtuple(
+                'RowwiseQuantized8BitsWeight', 'w'
+            )
+            return [RowwiseQuantized8BitsWeight(self.w)]
+        else:
+            RowwiseQuantized8BitsWeight = collections.namedtuple(
+                'RowwiseQuantized8BitsWeight', 'w, scale_bias'
+            )
+            return [RowwiseQuantized8BitsWeight(self.w, self.scale_bias)]
 
     def _gather_wrapper(self, net, version, in_indices, out):
         # Gather can work on all kinds of input data types, and output
@@ -161,6 +175,9 @@ class SparseLookup(ModelLayer):
 
             return net.Rowwise8BitQuantizedToFloat(
                 [gathered_w, gathered_scale_bias], out)
+        elif version == 'fused_uint8rowwise':
+            gathered_w = net.Gather([self.w, in_indices], 'gathered_w')
+            return net.Fused8BitRowwiseQuantizedToFloat(gathered_w, out)
         else:
             raise "Unsupported version of operators in SparseLookup " +\
                 "layer: {0}".format(version)
@@ -188,6 +205,9 @@ class SparseLookup(ModelLayer):
         elif version == 'uint8rowwise':
             op_input.insert(len(op_input), self.scale_bias)
             net.__getattr__(layer_name + '8BitsRowwise')(
+                op_input, self.output_schema.field_blobs())
+        elif version == 'fused_uint8rowwise':
+            net.__getattr__(layer_name + 'Fused8BitRowwise')(
                 op_input, self.output_schema.field_blobs())
         else:
             raise "Unsupported version of operator in SparseLookUp " +\
@@ -223,6 +243,9 @@ class SparseLookup(ModelLayer):
             elif version == 'uint8rowwise':
                 op_input.insert(len(op_input), self.scale_bias)
                 net.__getattr__(layer_name + '8BitsRowwise')(
+                    op_input, self.output_schema.field_blobs())
+            elif version == 'fused_uint8rowwise':
+                net.__getattr__(layer_name + 'Fused8BitRowwise')(
                     op_input, self.output_schema.field_blobs())
             else:
                 raise "Unsupported version of operator in SparseLookUp " +\
@@ -285,6 +308,9 @@ class SparseLookup(ModelLayer):
             elif version == 'uint8rowwise':
                 net.__getattr__(layer_name + '8BitsRowwise')(
                     op_input, self.output_schema.field_blobs())
+            elif version == 'fused_uint8rowwise':
+                net.__getattr__(layer_name + 'Fused8BitRowwise')(
+                    op_input, self.output_schema.field_blobs())
             else:
                 raise "Unsupported version of operator in SparseLookUp " +\
                     "layer: {0}".format(version)
@@ -309,6 +335,12 @@ class SparseLookup(ModelLayer):
         version = get_sparse_lookup_predictor_version(
             **cur_scope.get(get_sparse_lookup_predictor_version.__name__,
                             {'version': 'fp32'}))
+
+        # TODO(amalevich): Layer should not be responsible for decision about
+        # quantization.
+        if not self.support_8bit() and version in {'uint8rowwise',
+                                                   'fused_uint8rowwise'}:
+            version = 'fp32'
 
         if _is_id_list(self.input_record):
             self._add_ops_id_list(net, version=version)

@@ -1,3 +1,4 @@
+include(CheckCCompilerFlag)
 include(CheckCXXSourceCompiles)
 include(CheckCXXCompilerFlag)
 include(CMakePushCheckState)
@@ -48,6 +49,47 @@ if (CAFFE2_LONG_IS_INT32_OR_64)
 else()
   message(STATUS "Need to define long as a separate typeid.")
   set(CAFFE2_UNIQUE_LONG_TYPEMETA 1)
+endif()
+cmake_pop_check_state()
+
+# ---[ Check if std::exception_ptr is supported.
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_FLAGS "-std=c++11")
+CHECK_CXX_SOURCE_COMPILES(
+    "#include <string>
+    #include <exception>
+    int main(int argc, char** argv) {
+      std::exception_ptr eptr;
+      try {
+          std::string().at(1);
+      } catch(...) {
+          eptr = std::current_exception();
+      }
+    }" CAFFE2_EXCEPTION_PTR_SUPPORTED)
+
+if (CAFFE2_EXCEPTION_PTR_SUPPORTED)
+  message(STATUS "std::exception_ptr is supported.")
+  set(CAFFE2_USE_EXCEPTION_PTR 1)
+else()
+  message(STATUS "std::exception_ptr is NOT supported.")
+endif()
+cmake_pop_check_state()
+
+# ---[ Check for NUMA support
+cmake_push_check_state(RESET)
+set(CMAKE_REQUIRED_FLAGS "-std=c++11")
+CHECK_CXX_SOURCE_COMPILES(
+    "#include <numa.h>
+    #include <numaif.h>
+
+    int main(int argc, char** argv) {
+    }" CAFFE2_IS_NUMA_AVAILABLE)
+
+if (CAFFE2_IS_NUMA_AVAILABLE)
+  message(STATUS "NUMA is available")
+else()
+  message(STATUS "NUMA is not available")
+  set(CAFFE2_DISABLE_NUMA 1)
 endif()
 cmake_pop_check_state()
 
@@ -108,29 +150,55 @@ cmake_pop_check_state()
 if (${CMAKE_CXX_COMPILER_ID} STREQUAL "MSVC")
   add_compile_options(
       ##########################################
+      # Protobuf related. Cannot remove.
+      # This is directly copied from
+      #     https://github.com/google/protobuf/blob/master/cmake/README.md
+      ##########################################
+      /wd4018 # 'expression' : signed/unsigned mismatch
+      /wd4065 # (3): switch with default but no case.
+      /wd4146 # unary minus operator applied to unsigned type, result still unsigned
+      /wd4244 # Conversion from 'type1' to 'type2', possible loss of data.
+      /wd4251 # 'identifier' : class 'type' needs to have dll-interface to be used by clients of class 'type2'
+      /wd4267 # Conversion from 'size_t' to 'type', possible loss of data.
+      /wd4305 # 'identifier' : truncation from 'type1' to 'type2'
+      /wd4355 # 'this' : used in base member initializer list
+      /wd4506 # (1): no definition for inline function. Protobuf related.
+      /wd4661 # No suitable definition provided for explicit template instantiation request
+      /wd4800 # 'type' : forcing value to bool 'true' or 'false' (performance warning)
+      /wd4996 # 'function': was declared deprecated
+      ##########################################
       # Third party related. Cannot remove.
       ##########################################
-      /wd4065 # (3): switch with default but no case. Protobuf related.
+      /wd4141 # (1): inline used twice. google benchmark related.
       /wd4503 # (1): decorated name length exceeded, name was truncated.
               #      Eigen related.
-      /wd4506 # (1): no definition for inline function. Protobuf related.
-      /wd4554 # (3)： check operator precedence for possible error.
+      /wd4554 # (3): check operator precedence for possible error.
               # Eigen related.
+      /wd4805 # (1): Unsafe mix of types in gtest/gtest.h. Gtest related.
       ##########################################
-      # These are directly Caffe2 related.
+      # These are directly Caffe2 related. However, several are covered by
+      # protobuf now. We leave them here for documentation purposes only.
       ##########################################
-      /wd4018 # (3): Signed/unsigned mismatch. We've used it in many places of
-              #      the code and it would be hard to correct all.
-      /wd4244 # (2/3/4): Possible loss of precision. Various cases where we
-              #      implicitly cast TIndex to int etc. Need further cleaning.
-      /wd4267 # (3): Conversion of size_t to smaller type. Same reason as 4244.
-      /wd4996 # (3): Use of deprecated POSIX functions. Since we develop
-              #      mainly on Linux, this is ignored.
+      #/wd4018 # (3): Signed/unsigned mismatch. We've used it in many places
+      #        #      of the code and it would be hard to correct all.
+      #/wd4244 # (2/3/4): Possible loss of precision. Various cases where we
+      #        #      implicitly cast TIndex to int etc. Need cleaning.
+      #/wd4267 # (3): Conversion of size_t to smaller type. Same as 4244.
+      #/wd4996 # (3): Use of deprecated POSIX functions. Since we develop
+      #        #      mainly on Linux, this is ignored.
+      /wd4273 # (1): inconsistent dll linkage. This is related to the
+              #      caffe2 FLAGS_* definition using dllimport in header and
+              #      dllexport in cc file. The strategy is copied from gflags.
   )
-  
+
   # Exception handing for compiler warining C4530, see
   # https://msdn.microsoft.com/en-us/library/2axwkyt4.aspx
   add_definitions("/EHsc")
+
+  set(CMAKE_SHARED_LINKER_FLAGS
+      "${CMAKE_SHARED_LINKER_FLAGS} /ignore:4049 /ignore:4217")
+  set(CMAKE_EXE_LINKER_FLAGS
+      "${CMAKE_EXE_LINKER_FLAGS} /ignore:4049 /ignore:4217")
 endif()
 
 # ---[ If we are building on ios, or building with opengl support, we will
@@ -144,6 +212,23 @@ endif()
 if (IOS)
   add_definitions("-mfpu=neon-fp16")
   add_definitions("-Wno-deprecated-declarations")
+endif()
+
+# ---[ If we are building with ACL, we will enable neon-fp16.
+if(USE_ACL)
+  if (CMAKE_SYSTEM_PROCESSOR MATCHES "^armv")
+    # 32-bit ARM (armv7, armv7-a, armv7l, etc)
+    set(ACL_ARCH "armv7a")
+    # Compilers for 32-bit ARM need extra flags to enable NEON-FP16
+    add_definitions("-mfpu=neon-fp16")
+
+    include(CheckCCompilerFlag)
+    CHECK_C_COMPILER_FLAG(
+        -mfp16-format=ieee CAFFE2_COMPILER_SUPPORTS_FP16_FORMAT)
+    if (CAFFE2_COMPILER_SUPPORTS_FP16_FORMAT)
+      add_definitions("-mfp16-format=ieee")
+    endif()
+  endif()
 endif()
 
 # ---[ If we use asan, turn on the flags.

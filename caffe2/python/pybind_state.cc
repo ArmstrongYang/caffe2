@@ -22,6 +22,7 @@
 #include "caffe2/contrib/script/compiler.h"
 #include "caffe2/core/asan.h"
 #include "caffe2/core/db.h"
+#include "caffe2/core/numa.h"
 #include "caffe2/core/operator.h"
 #include "caffe2/core/predictor.h"
 #include "caffe2/core/stats.h"
@@ -266,7 +267,7 @@ void addObjectMethods(py::module& m) {
       .def(
           "average_time",
           [](ObserverBase<NetBase>* ob) {
-            auto* cast_ob = dynamic_cast_if_rtti<TimeObserver<NetBase>*>(ob);
+            auto* cast_ob = dynamic_cast_if_rtti<TimeObserver*>(ob);
             CAFFE_ENFORCE(
                 cast_ob, "Observer does not implement this function.");
             return cast_ob->average_time();
@@ -274,7 +275,7 @@ void addObjectMethods(py::module& m) {
       .def(
           "average_time_children",
           [](ObserverBase<NetBase>* ob) {
-            auto* cast_ob = dynamic_cast_if_rtti<TimeObserver<NetBase>*>(ob);
+            auto* cast_ob = dynamic_cast_if_rtti<TimeObserver*>(ob);
             CAFFE_ENFORCE(
                 cast_ob, "Observer does not implement this function.");
             return cast_ob->average_time_children();
@@ -884,13 +885,12 @@ void addGlobalMethods(py::module& m) {
         NetBase* net = gWorkspace->GetNet(net_name);
         const Observable<NetBase>::Observer* observer = nullptr;
 
-#define REGISTER_PYTHON_EXPOSED_OBSERVER(ob_type)        \
-  {                                                      \
-    if (observer_type.compare(#ob_type) == 0) {          \
-      unique_ptr<ob_type<NetBase>> net_ob =              \
-          make_unique<ob_type<NetBase>>(net);            \
-      observer = net->AttachObserver(std::move(net_ob)); \
-    }                                                    \
+#define REGISTER_PYTHON_EXPOSED_OBSERVER(ob_type)             \
+  {                                                           \
+    if (observer_type.compare(#ob_type) == 0) {               \
+      unique_ptr<ob_type> net_ob = make_unique<ob_type>(net); \
+      observer = net->AttachObserver(std::move(net_ob));      \
+    }                                                         \
   }
 
         REGISTER_PYTHON_EXPOSED_OBSERVER(TimeObserver);
@@ -1223,6 +1223,17 @@ void addGlobalMethods(py::module& m) {
       stats_map[stat.key] = stat.value;
     }
     return stats_map;
+  });
+  m.def("is_numa_enabled", []() { return IsNUMAEnabled(); });
+  m.def("get_num_numa_nodes", []() { return GetNumNUMANodes(); });
+  m.def("get_blob_numa_node", [](const std::string& blob_name) {
+    CAFFE_ENFORCE(gWorkspace);
+    auto* blob = gWorkspace->GetBlob(blob_name);
+    CAFFE_ENFORCE(blob);
+    const TensorCPU& tensor = blob->Get<TensorCPU>();
+    const void* raw_data = tensor.raw_data();
+    CAFFE_ENFORCE(raw_data);
+    return GetNUMANode(raw_data);
   });
 
 #define CAFFE2_CPU_FEATURE_SUPPORT(feature) \

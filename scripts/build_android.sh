@@ -48,6 +48,11 @@ cd $BUILD_ROOT
 
 CMAKE_ARGS=()
 
+# If Ninja is installed, prefer it to Make
+if [ -x "$(command -v ninja)" ]; then
+  CMAKE_ARGS+=("-GNinja")
+fi
+
 # Use locally built protoc because we'll build libprotobuf for the
 # target architecture and need an exact version match.
 CMAKE_ARGS+=("-DCAFFE2_CUSTOM_PROTOC_EXECUTABLE=$CAFFE2_ROOT/build_host_protoc/bin/protoc")
@@ -61,9 +66,9 @@ CMAKE_ARGS+=("-DBUILD_BINARY=OFF")
 CMAKE_ARGS+=("-DBUILD_PYTHON=OFF")
 CMAKE_ARGS+=("-DBUILD_SHARED_LIBS=OFF")
 CMAKE_ARGS+=("-DANDROID_TOOLCHAIN=gcc")
-
 # Disable unused dependencies
 CMAKE_ARGS+=("-DUSE_CUDA=OFF")
+CMAKE_ARGS+=("-DUSE_GFLAGS=OFF")
 CMAKE_ARGS+=("-DUSE_OPENCV=OFF")
 CMAKE_ARGS+=("-DUSE_LMDB=OFF")
 CMAKE_ARGS+=("-DUSE_LEVELDB=OFF")
@@ -80,16 +85,17 @@ CMAKE_ARGS+=("-DANDROID_NDK=$ANDROID_NDK")
 CMAKE_ARGS+=("-DANDROID_ABI=armeabi-v7a with NEON")
 CMAKE_ARGS+=("-DANDROID_NATIVE_API_LEVEL=21")
 CMAKE_ARGS+=("-DANDROID_CPP_FEATURES=rtti exceptions")
+# TODO: As the toolchain file doesn't support NEON-FP16 extension,
+# we disable USE_MOBILE_OPENGL for now, it will be re-enabled in the future.
+CMAKE_ARGS+=("-DUSE_MOBILE_OPENGL=OFF")
 
-# Compiler flags
-CMAKE_ARGS+=("-DCMAKE_C_FLAGS=")
-CMAKE_ARGS+=("-DCMAKE_CXX_FLAGS=-s")
+# Use-specified CMake arguments go last to allow overridding defaults
+CMAKE_ARGS+=($@)
 
 cmake "$CAFFE2_ROOT" \
     -DCMAKE_INSTALL_PREFIX=../install \
     -DCMAKE_BUILD_TYPE=Release \
-    "${CMAKE_ARGS[@]}" \
-    "$@"
+    "${CMAKE_ARGS[@]}"
 
 # Cross-platform parallel build
 if [ "$(uname)" == "Darwin" ]; then

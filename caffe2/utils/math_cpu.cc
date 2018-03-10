@@ -443,6 +443,8 @@ void GemmBatched<float, CPUContext>(
   const int c_stride = M * N;
 
 #ifdef CAFFE2_USE_MKL
+  (void)context;
+
   const int lda = (TransA == CblasNoTrans) ? K : M;
   const int ldb = (TransB == CblasNoTrans) ? N : K;
   std::vector<const float*> a_array(batch_size, nullptr);
@@ -755,7 +757,9 @@ DEFINE_BROADCAST_BINARY_FUNCTION(Div, /)
   template <>                                                                 \
   void Set<T, CPUContext>(const size_t N, const T alpha, T* Y, CPUContext*) { \
     if (alpha == (T)0) {                                                      \
-      memset(Y, 0, N * sizeof(T));                                            \
+      if (Y != nullptr) {                                                     \
+        memset(Y, 0, N * sizeof(T));                                          \
+      }                                                                       \
     } else {                                                                  \
       EigenVectorMap<T>(Y, N).setConstant(alpha);                             \
     }                                                                         \
@@ -1475,6 +1479,9 @@ void CopyMatrix<CPUContext>(
     const int ldb,
     CPUContext* /*context*/,
     TypeMeta::TypedCopy copy) {
+  if (A == nullptr || B == nullptr) {
+    return;
+  }
   if (lda == N && ldb == N) {
     // can coalese to a single memcpy of size M * N
     if (copy) {

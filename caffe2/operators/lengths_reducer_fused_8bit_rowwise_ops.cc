@@ -25,15 +25,16 @@ REGISTER_CPU_OPERATOR(
 OPERATOR_SCHEMA(SparseLengthsSumFused8BitRowwise)
     .NumInputs(3)
     .NumOutputs(1)
-    .SetDoc(
-        R"DOC(Performs the same operation as SparseLengthsSum, but operating on
-        8-bit rowwise quantized matrices with fused storage (where each row
-        stores the scale, bias and then quantized values).)DOC")
+    .SetDoc(R"DOC(
+Performs the same operation as SparseLengthsSum, but operating on
+8-bit rowwise quantized matrices with fused storage (where each row
+stores quantized values, and then 4-byte scale and 4-byte bias).
+)DOC")
     .Input(
         0,
         "DATA",
         "uint8 tensor obtained with "
-        "operator FloatToFusedRowwiseQuantized8Bits")
+        "operator FloatToFused8BitRowwiseQuantized")
     .Input(
         1,
         "INDICES",
@@ -52,14 +53,16 @@ REGISTER_CPU_OPERATOR(
 OPERATOR_SCHEMA(SparseLengthsWeightedSumFused8BitRowwise)
     .NumInputs(4)
     .NumOutputs(1)
-    .SetDoc(R"DOC(Performs the same operation as SparseLengthsWeightedSum,
-        but operating on 8-bit rowwise quantized matrices with fused storage
-        (where each row stores the scale, bias and then quantized values).)DOC")
+    .SetDoc(R"DOC(
+Performs the same operation as SparseLengthsWeightedSum,
+but operating on 8-bit rowwise quantized matrices with fused storage
+(where each row stores quantized values, and then 4-byte scale and 4-byte bias).
+)DOC")
     .Input(
         0,
         "DATA",
         "uint8 tensor obtained with "
-        "operator FloatToFusedRowwiseQuantized8Bits")
+        "operator FloatToFused8BitRowwiseQuantized")
     .Input(
         1,
         "INDICES",
@@ -86,14 +89,16 @@ REGISTER_CPU_OPERATOR(
 OPERATOR_SCHEMA(SparseLengthsMeanFused8BitRowwise)
     .NumInputs(3)
     .NumOutputs(1)
-    .SetDoc(R"DOC(Performs the same operation as SparseLengthsMean, but
-        operating on 8-bit rowwise quantized matrices with fused storage
-        (where each row stores the scale, bias and then quantized values).)DOC")
+    .SetDoc(R"DOC(
+Performs the same operation as SparseLengthsMean, but
+operating on 8-bit rowwise quantized matrices with fused storage
+(where each row stores quantized values, and then 4-byte scale and 4-byte bias).
+)DOC")
     .Input(
         0,
         "DATA",
         "uint8 tensor obtained with "
-        "operator FloatToFusedRowwiseQuantized8Bits")
+        "operator FloatToFused8BitRowwiseQuantized")
     .Input(
         1,
         "INDICES",
